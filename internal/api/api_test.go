@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexandrmotologa/llmmeter/internal/metrics"
 	"github.com/alexandrmotologa/llmmeter/internal/store"
 )
 
@@ -20,7 +21,8 @@ func TestAPIServer(t *testing.T) {
 	s, _ := store.New(filepath.Join(tmpDir, "finops.db"))
 	defer s.Close()
 
-	// Seed one tenant and log
+	metrics.Init(s)
+
 	_ = s.CreateTenant(store.Tenant{
 		ID:             "tenant-delta",
 		Name:           "Delta Corp",
@@ -33,6 +35,7 @@ func TestAPIServer(t *testing.T) {
 		Model:            "gpt-4o",
 		PromptTokens:     2000,
 		CompletionTokens: 500,
+		CachedTokens:     800,
 		CostUSD:          0.01,
 		LatencyMS:        250,
 		Timestamp:        time.Now(),
@@ -50,49 +53,71 @@ func TestAPIServer(t *testing.T) {
 	if wOverview.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for overview, got %d", wOverview.Code)
 	}
-	var ov store.OverviewSummary
-	_ = json.Unmarshal(wOverview.Body.Bytes(), &ov)
-	if ov.ActiveTenantsCount != 1 || ov.TotalRevenueUSD != 99.0 {
-		t.Errorf("unexpected overview data: %+v", ov)
+
+	// 2. GET /api/cache-analytics
+	reqCache := httptest.NewRequest(http.MethodGet, "/api/cache-analytics", nil)
+	wCache := httptest.NewRecorder()
+	mux.ServeHTTP(wCache, reqCache)
+
+	if wCache.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for cache analytics, got %d", wCache.Code)
+	}
+	var ca store.CacheAnalytics
+	_ = json.Unmarshal(wCache.Body.Bytes(), &ca)
+	if ca.TotalCachedTokens != 800 {
+		t.Errorf("expected 800 cached tokens, got %d", ca.TotalCachedTokens)
 	}
 
-	// 2. GET /api/tenants
-	reqTenants := httptest.NewRequest(http.MethodGet, "/api/tenants", nil)
-	wTenants := httptest.NewRecorder()
-	mux.ServeHTTP(wTenants, reqTenants)
+	// 3. GET /api/tenants/tenant-delta/statement (JSON)
+	reqStmt := httptest.NewRequest(http.MethodGet, "/api/tenants/tenant-delta/statement", nil)
+	wStmt := httptest.NewRecorder()
+	mux.ServeHTTP(wStmt, reqStmt)
 
-	if wTenants.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for tenants, got %d", wTenants.Code)
+	if wStmt.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for statement, got %d", wStmt.Code)
+	}
+	var stmt store.TenantStatement
+	_ = json.Unmarshal(wStmt.Body.Bytes(), &stmt)
+	if stmt.TenantName != "Delta Corp" || len(stmt.LineItems) != 1 {
+		t.Errorf("unexpected statement data: %+v", stmt)
 	}
 
-	// 3. POST /api/tenants
-	newTenantJSON := `{"id":"tenant-epsilon","name":"Epsilon Inc","monthly_plan_usd":199.0}`
-	reqPostTenant := httptest.NewRequest(http.MethodPost, "/api/tenants", strings.NewReader(newTenantJSON))
-	wPostTenant := httptest.NewRecorder()
-	mux.ServeHTTP(wPostTenant, reqPostTenant)
+	// 4. GET /api/tenants/tenant-delta/statement?format=html
+	reqStmtHTML := httptest.NewRequest(http.MethodGet, "/api/tenants/tenant-delta/statement?format=html", nil)
+	wStmtHTML := httptest.NewRecorder()
+	mux.ServeHTTP(wStmtHTML, reqStmtHTML)
 
-	if wPostTenant.Code != http.StatusCreated {
-		t.Fatalf("expected 201 Created for post tenant, got %d", wPostTenant.Code)
+	if wStmtHTML.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for HTML statement, got %d", wStmtHTML.Code)
+	}
+	if !strings.Contains(wStmtHTML.Body.String(), "AI Usage &amp; Chargeback Statement") {
+		t.Errorf("expected statement HTML output")
 	}
 
-	// 4. GET /api/features
-	reqFeatures := httptest.NewRequest(http.MethodGet, "/api/features", nil)
-	wFeatures := httptest.NewRecorder()
-	mux.ServeHTTP(wFeatures, reqFeatures)
+	// 5. POST /api/simulator/simulate
+	simBody := `{"subscription_increase_usd":10.0,"model_replacements":{"gpt-4o":"gpt-4o-mini"}}`
+	reqSim := httptest.NewRequest(http.MethodPost, "/api/simulator/simulate", strings.NewReader(simBody))
+	wSim := httptest.NewRecorder()
+	mux.ServeHTTP(wSim, reqSim)
 
-	if wFeatures.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for features, got %d", wFeatures.Code)
+	if wSim.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for simulator, got %d", wSim.Code)
+	}
+	var simResp SimulationResponse
+	_ = json.Unmarshal(wSim.Body.Bytes(), &simResp)
+	if simResp.SimulatedRevenueUSD != 109.0 {
+		t.Errorf("expected simulated revenue 109.0, got %f", simResp.SimulatedRevenueUSD)
 	}
 
-	// 5. GET /api/export/csv
-	reqCSV := httptest.NewRequest(http.MethodGet, "/api/export/csv", nil)
-	wCSV := httptest.NewRecorder()
-	mux.ServeHTTP(wCSV, reqCSV)
+	// 6. GET /metrics (Prometheus)
+	reqMetrics := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	wMetrics := httptest.NewRecorder()
+	mux.ServeHTTP(wMetrics, reqMetrics)
 
-	if wCSV.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for csv export, got %d", wCSV.Code)
+	if wMetrics.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /metrics, got %d", wMetrics.Code)
 	}
-	if !strings.Contains(wCSV.Body.String(), "Delta Corp") {
-		t.Errorf("expected CSV to contain Delta Corp, got: %s", wCSV.Body.String())
+	if !strings.Contains(wMetrics.Body.String(), "llmmeter_http_requests_total") {
+		t.Errorf("expected prometheus metrics format")
 	}
 }

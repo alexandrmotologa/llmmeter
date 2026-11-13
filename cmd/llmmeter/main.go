@@ -16,9 +16,12 @@ import (
 	"time"
 
 	"github.com/alexandrmotologa/llmmeter/internal/api"
+	"github.com/alexandrmotologa/llmmeter/internal/cache"
 	"github.com/alexandrmotologa/llmmeter/internal/finops"
+	"github.com/alexandrmotologa/llmmeter/internal/metrics"
 	"github.com/alexandrmotologa/llmmeter/internal/pricing"
 	"github.com/alexandrmotologa/llmmeter/internal/proxy"
+	"github.com/alexandrmotologa/llmmeter/internal/ratelimit"
 	"github.com/alexandrmotologa/llmmeter/internal/store"
 	"github.com/alexandrmotologa/llmmeter/web"
 )
@@ -109,7 +112,11 @@ func cmdServe(args []string) {
 	}
 	defer s.Close()
 
-	proxyHandler := proxy.NewHandler(s)
+	memCache := cache.NewMemoryCache(10 * time.Minute)
+	rateLimiter := ratelimit.NewLimiter()
+	metrics.Init(s)
+
+	proxyHandler := proxy.NewHandler(s, memCache, rateLimiter)
 	apiServer := api.NewServer(s)
 
 	mux := http.NewServeMux()
@@ -145,7 +152,8 @@ func cmdServe(args []string) {
 	fmt.Printf(" [✓] Storage:            SQLite (WAL Mode) at %s\n", *dbPath)
 	fmt.Printf(" [✓] FinOps Web Studio:  http://localhost:%d\n", *port)
 	fmt.Printf(" [✓] LLM Proxy Endpoint: http://localhost:%d/v1/chat/completions\n", *port)
-	fmt.Printf(" [✓] Health Check:       http://localhost:%d/health\n\n", *port)
+	fmt.Printf(" [✓] Health & Cache:     http://localhost:%d/health\n", *port)
+	fmt.Printf(" [✓] Prometheus Metrics: http://localhost:%d/metrics\n\n", *port)
 	fmt.Println("Press Ctrl+C to stop.")
 
 	go func() {

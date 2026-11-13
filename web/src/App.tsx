@@ -9,6 +9,8 @@ import { RecommendationOptimizer } from "./components/RecommendationOptimizer";
 import { LiveInspector } from "./components/LiveInspector";
 import { TenantModal } from "./components/TenantModal";
 import { NewTenantModal } from "./components/NewTenantModal";
+import { MarginSimulator } from "./components/MarginSimulator";
+import { CacheRoiAnalytics } from "./components/CacheRoiAnalytics";
 import {
   OverviewSummary,
   TenantMetric,
@@ -150,6 +152,18 @@ export const App: React.FC = () => {
           <div className="space-y-6">
             <FeatureWaterfall features={features} />
             <ModelDistribution models={models} />
+          </div>
+        )}
+
+        {currentTab === "simulator" && (
+          <div className="space-y-6">
+            <MarginSimulator />
+          </div>
+        )}
+
+        {currentTab === "cache" && (
+          <div className="space-y-6">
+            <CacheRoiAnalytics />
           </div>
         )}
 

@@ -73,11 +73,23 @@
 - Enforces monthly budget caps. When a tenant exceeds their cap, the proxy returns HTTP 429 with `X-Budget-Exceeded: true`.
 - Evaluates routes and proposes model rightsizing (e.g. Claude 3.5 Sonnet to Claude 3.5 Haiku) with projected monthly savings.
 
-### 4. Storage Engine (`internal/store`)
+### 4. Semantic Cache & Token ROI (`internal/cache`)
+- In-memory SHA-256 semantic hash cache for non-streaming completions with configurable TTL.
+- Serves repeated queries with sub-millisecond latency and header `X-Cache: HIT`.
+- Computes dollars saved based on full prompt and completion token costs.
+
+### 5. Rate Limiter & Circuit Breaker (`internal/ratelimit`)
+- Per-tenant sliding window tracking RPM (requests per minute) and TPM (tokens per minute).
+- Runaway agent loop circuit breaker trips when short-term spend surges beyond safety thresholds, returning HTTP 429 with `X-Circuit-Breaker: tripped`.
+
+### 6. Storage Engine (`internal/store`)
 - Embedded SQLite using `modernc.org/sqlite` without CGO.
 - Operates in WAL mode with normal synchronization for concurrent reads and writes.
 - Manages tables for tenants, request logs, alerts, and recommendations.
 
-### 5. Web Studio (`web/`)
+### 7. Observability & Prometheus Metrics (`internal/metrics`)
+- Exposes native Prometheus format on `/metrics` for scraping by Prometheus, Grafana Agent, or Datadog.
+
+### 8. Web Studio (`web/`)
 - Built with React 19, TypeScript, Tailwind CSS, and Recharts.
-- Provides real-time visibility into customer unit economics, feature cost waterfalls, model distribution, alerts, and model rightsizing.
+- Provides real-time visibility into customer unit economics, feature cost waterfalls, model distribution, alerts, model rightsizing, prompt cache ROI analytics, and interactive what-if financial projections.

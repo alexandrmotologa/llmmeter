@@ -15,9 +15,15 @@ Software companies that sell AI features on flat subscription plans often lose m
 - **Feature Cost Attribution**: Identifies which specific features (e.g. search, summarization, copilot) drive the monthly cloud invoice via `X-Feature-Tag`.
 - **Gross Margin Engine**: Compares customer subscription tiers against exact LLM token costs:
   `Gross Margin % = ((Subscription Revenue - LLM Cost) / Subscription Revenue) * 100`
+- **Dynamic Auto-Rightsizing**: Intercepts requests for accounts operating at negative gross margin and transparently routes expensive models to cost-effective alternatives with header `X-Auto-Rightsizing: true`.
+- **Semantic Caching & Token ROI**: In-memory semantic hash cache delivering sub-millisecond latency (`X-Cache: HIT`) and real-time dollar tracking on Anthropic and OpenAI prompt caching.
+- **Circuit Breakers & Rate Limits**: Per-tenant RPM/TPM sliding windows and runaway agent loop circuit breakers that trip if tenant spend surges beyond configured thresholds.
+- **Prometheus Observability**: Native `/metrics` endpoint with Prometheus counters and histograms for Grafana and Datadog monitoring.
+- **Interactive What-If Simulator**: Models the exact financial impact of subscription price adjustments and model migration policies before deploying code changes.
+- **Auditor Tenant Statements**: Generates print-ready HTML and JSON billing audit statements for FinOps teams and customer invoice reconciliations.
 - **Anomaly Detection**: Flags individual requests that cost more than 3x the tenant 30-day baseline.
 - **Budget Guardrails**: Enforces monthly budget caps per customer. Throttles requests with HTTP 429 when limits are reached.
-- **Downgrade Advisor**: Scans routes with negative margins and suggests cheaper model substitutions (e.g. Claude 3.5 Sonnet to Claude 3.5 Haiku) with projected monthly savings.
+- **Downgrade Advisor**: Scans routes with negative margins and suggests cheaper model substitutions with projected monthly savings.
 - **Embedded Web Cockpit**: Ships with a dark-theme React 19 dashboard inside the Go binary. Uses under 20MB of RAM.
 
 ## Architecture

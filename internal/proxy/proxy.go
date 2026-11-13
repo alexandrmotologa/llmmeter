@@ -12,11 +12,15 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alexandrmotologa/llmmeter/internal/cache"
 	"github.com/alexandrmotologa/llmmeter/internal/finops"
+	"github.com/alexandrmotologa/llmmeter/internal/metrics"
 	"github.com/alexandrmotologa/llmmeter/internal/pricing"
+	"github.com/alexandrmotologa/llmmeter/internal/ratelimit"
 	"github.com/alexandrmotologa/llmmeter/internal/store"
 	"github.com/google/uuid"
 )
@@ -33,12 +37,34 @@ type Context struct {
 
 // Handler is the reverse proxy HTTP handler.
 type Handler struct {
-	store *store.Store
+	store   *store.Store
+	cache   *cache.MemoryCache
+	limiter *ratelimit.Limiter
 }
 
-// NewHandler creates a new proxy handler.
-func NewHandler(s *store.Store) *Handler {
-	return &Handler{store: s}
+// NewHandler creates a new proxy handler with caching and rate limiting.
+func NewHandler(s *store.Store, c *cache.MemoryCache, l *ratelimit.Limiter) *Handler {
+	if c == nil {
+		c = cache.NewMemoryCache(5 * time.Minute)
+	}
+	if l == nil {
+		l = ratelimit.NewLimiter()
+	}
+	return &Handler{
+		store:   s,
+		cache:   c,
+		limiter: l,
+	}
+}
+
+// GetCache returns the memory cache instance.
+func (h *Handler) GetCache() *cache.MemoryCache {
+	return h.cache
+}
+
+// GetLimiter returns the rate limiter instance.
+func (h *Handler) GetLimiter() *ratelimit.Limiter {
+	return h.limiter
 }
 
 // ExtractContext extracts tenant attribution details from incoming request.
@@ -138,7 +164,7 @@ func buildUpstreamAuth(provider, clientKey string) string {
 	}
 }
 
-// ServeChatCompletions handles POST /v1/chat/completions with token metering and SSE pass-through.
+// ServeChatCompletions handles POST /v1/chat/completions with token metering, semantic caching, and dynamic rightsizing.
 func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":{"message":"Method not allowed"}}`, http.StatusMethodNotAllowed)
@@ -147,6 +173,15 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	ctx := ExtractContext(r)
+
+	// 1. Rate Limiting & Circuit Breaker Check
+	if allowed, reason := h.limiter.Allow(ctx.TenantID); !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-RateLimit-Violation", "true")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"message":%q,"type":"rate_limit_exceeded"}}`, reason)))
+		return
+	}
 
 	// Ensure tenant exists in database
 	tenant, _ := h.store.GetTenant(ctx.TenantID)
@@ -157,6 +192,18 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 			MonthlyPlanUSD: 0.0,
 		})
 		tenant, _ = h.store.GetTenant(ctx.TenantID)
+	}
+
+	// 2. Budget Guardrail Check
+	if tenant != nil && tenant.MonthlyBudgetUSD != nil && *tenant.MonthlyBudgetUSD > 0 {
+		exceeded, _, _, _ := finops.CheckBudgetCap(h.store, tenant, 0.01)
+		if exceeded {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Budget-Exceeded", "true")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"Monthly LLM budget cap exceeded for this tenant.","type":"budget_exceeded"}}`))
+			return
+		}
 	}
 
 	// Read body
@@ -177,19 +224,70 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 		model = "gpt-4o-mini"
 	}
 
+	// 3. Dynamic Auto-Rightsizing & Runtime Fallback
+	autoRightsizing := strings.EqualFold(r.Header.Get("X-Auto-Rightsizing"), "true")
+	if !autoRightsizing && tenant != nil && tenant.MonthlyPlanUSD > 0 {
+		currentSpend, _ := h.store.GetTenantMonthSpend(tenant.ID)
+		if currentSpend > tenant.MonthlyPlanUSD {
+			// Negative gross margin auto-recovery enabled!
+			autoRightsizing = true
+		}
+	}
+
+	downgraded := false
+	originalModel := model
+	downgradeReason := ""
+
+	if autoRightsizing {
+		if opt, ok := finops.GetCatalogOption(model); ok {
+			model = opt.SuggestedModel
+			downgraded = true
+			downgradeReason = "Negative gross margin auto-rightsizer policy"
+
+			// Rewrite model in JSON payload
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				bodyMap["model"] = model
+				if modified, err := json.Marshal(bodyMap); err == nil {
+					bodyBytes = modified
+				}
+			}
+		}
+	}
+
 	provider := r.Header.Get("X-Provider")
 	if provider == "" {
 		provider = pricing.DetectProvider(model)
 	}
 
-	// Budget Guardrail
-	if tenant != nil && tenant.MonthlyBudgetUSD != nil && *tenant.MonthlyBudgetUSD > 0 {
-		exceeded, _, _, _ := finops.CheckBudgetCap(h.store, tenant, 0.01)
-		if exceeded {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Budget-Exceeded", "true")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"message":"Monthly LLM budget cap exceeded for this tenant.","type":"budget_exceeded"}}`))
+	// 4. Semantic Response Cache Check (for non-streaming queries)
+	cacheKey := cache.HashKey(ctx.TenantID, model, bodyBytes)
+	cacheTTL := 5 * time.Minute
+	if ttlHeader := r.Header.Get("X-Cache-TTL"); ttlHeader != "" {
+		if sec, err := strconv.Atoi(ttlHeader); err == nil && sec > 0 {
+			cacheTTL = time.Duration(sec) * time.Second
+		}
+	}
+
+	if !req.Stream && r.Header.Get("X-No-Cache") != "true" {
+		if cachedItem := h.cache.Get(cacheKey); cachedItem != nil {
+			w.Header().Set("Content-Type", cachedItem.ContentType)
+			w.Header().Set("X-Cache", "HIT")
+			w.Header().Set("X-Cache-Latency", "0ms")
+			if downgraded {
+				w.Header().Set("X-Model-Downgraded", "true")
+				w.Header().Set("X-Original-Model", originalModel)
+				w.Header().Set("X-Rightsized-Model", model)
+				w.Header().Set("X-Downgrade-Reason", downgradeReason)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(cachedItem.ResponseBytes)
+
+			savedCost := pricing.ComputeCost(model, cachedItem.PromptTokens, cachedItem.CompletionTokens, cachedItem.CachedTokens)
+			h.cache.RecordSavings(savedCost)
+			if m := metrics.Get(); m != nil {
+				m.RecordCacheHit()
+			}
 			return
 		}
 	}
@@ -250,12 +348,21 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add(k, v)
 		}
 	}
+
+	// Add llmmeter diagnostic headers
+	if downgraded {
+		w.Header().Set("X-Model-Downgraded", "true")
+		w.Header().Set("X-Original-Model", originalModel)
+		w.Header().Set("X-Rightsized-Model", model)
+		w.Header().Set("X-Downgrade-Reason", downgradeReason)
+	}
+	w.Header().Set("X-Cache", "MISS")
+
 	w.WriteHeader(upstreamResp.StatusCode)
 
 	var promptTokens, completionTokens, cachedTokens int
 
 	if req.Stream {
-		// Flush SSE events in real-time
 		flusher, ok := w.(http.Flusher)
 		reader := bufio.NewReader(upstreamResp.Body)
 
@@ -267,7 +374,6 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 					flusher.Flush()
 				}
 
-				// Inspect line for SSE usage block
 				lineStr := strings.TrimSpace(string(line))
 				if strings.HasPrefix(lineStr, "data: ") {
 					dataStr := strings.TrimPrefix(lineStr, "data: ")
@@ -288,12 +394,10 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		// Non-streaming: copy and parse usage
 		respBytes, err := io.ReadAll(upstreamResp.Body)
 		if err == nil {
 			_, _ = w.Write(respBytes)
 
-			// Decompress if gzip
 			var decompressed []byte = respBytes
 			if upstreamResp.Header.Get("Content-Encoding") == "gzip" {
 				if gr, err := gzip.NewReader(bytes.NewReader(respBytes)); err == nil {
@@ -310,12 +414,25 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 				completionTokens = parsed.Usage.Completion()
 				cachedTokens = parsed.Usage.Cached()
 			}
+
+			// Save to Semantic Cache if 200 OK
+			if upstreamResp.StatusCode == http.StatusOK {
+				h.cache.Set(cacheKey, cache.Item{
+					ResponseBytes:    decompressed,
+					ContentType:      upstreamResp.Header.Get("Content-Type"),
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					CachedTokens:     cachedTokens,
+				}, cacheTTL)
+				if m := metrics.Get(); m != nil {
+					m.RecordCacheMiss()
+				}
+			}
 		}
 	}
 
 	latency := time.Since(start).Milliseconds()
 
-	// If provider didn't return usage (e.g. streaming without include_usage or mock), estimate from lengths
 	if promptTokens == 0 && completionTokens == 0 {
 		promptTokens = len(bodyBytes) / 4
 		completionTokens = 50
@@ -323,7 +440,27 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	costUSD := pricing.ComputeCost(model, promptTokens, completionTokens, cachedTokens)
 
-	// Asynchronous attribution & margin checking (never slows down client response!)
+	// Rate limiter spend tracking & Circuit Breaker inspection
+	tripped, tripReason := h.limiter.RecordSpend(ctx.TenantID, costUSD, promptTokens+completionTokens)
+	if tripped {
+		if m := metrics.Get(); m != nil {
+			m.RecordCircuitBreakerTrip()
+		}
+		_ = h.store.CreateAlert(store.Alert{
+			TenantID:  ctx.TenantID,
+			Type:      "anomaly",
+			Message:   tripReason,
+			Severity:  "critical",
+			Timestamp: time.Now(),
+		})
+	}
+
+	// Prometheus metrics update
+	if m := metrics.Get(); m != nil {
+		m.RecordRequest(ctx.TenantID, provider, model, upstreamResp.StatusCode, promptTokens, completionTokens, cachedTokens, costUSD)
+	}
+
+	// Asynchronous attribution & margin checking
 	go func() {
 		logEntry := store.RequestLog{
 			ID:               uuid.New().String(),
@@ -341,7 +478,6 @@ func (h *Handler) ServeChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = h.store.LogRequest(logEntry)
 
-		// Anomaly & margin audit
 		_, _ = finops.CheckRequestAnomaly(h.store, ctx.TenantID, ctx.FeatureTag, model, costUSD)
 		if tenant != nil {
 			_, _ = finops.CheckNegativeMargin(h.store, tenant)
@@ -419,6 +555,10 @@ func (h *Handler) ServeEmbeddings(w http.ResponseWriter, r *http.Request) {
 	costUSD := pricing.ComputeCost(model, promptTokens, 0, 0)
 	latency := time.Since(start).Milliseconds()
 
+	if m := metrics.Get(); m != nil {
+		m.RecordRequest(ctx.TenantID, provider, model, resp.StatusCode, promptTokens, 0, 0, costUSD)
+	}
+
 	go func() {
 		_ = h.store.LogRequest(store.RequestLog{
 			TenantID:         ctx.TenantID,
@@ -468,13 +608,18 @@ func (h *Handler) ServeModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ServeHealth returns health status.
+// ServeHealth returns health status and cache/rate limiter metrics.
 func (h *Handler) ServeHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	var stats cache.Stats
+	if h.cache != nil {
+		stats = h.cache.GetStats()
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":    "ok",
-		"engine":    "llmmeter-go",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"status":      "ok",
+		"engine":      "llmmeter-go",
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"cache_stats": stats,
 	})
 }
 

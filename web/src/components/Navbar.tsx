@@ -27,6 +27,8 @@ export const Navbar: React.FC<NavbarProps> = ({
       badgeColor: "bg-rose-500/20 text-rose-400 border border-rose-500/30",
     },
     { id: "features", label: "Feature Breakdown" },
+    { id: "simulator", label: "What-If Simulator" },
+    { id: "cache", label: "Prompt Cache ROI" },
     {
       id: "recommendations",
       label: "Downgrade Advisor",

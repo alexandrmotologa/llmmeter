@@ -93,6 +93,51 @@ type Alert struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// CacheFeatureMetric represents caching stats for a specific feature.
+type CacheFeatureMetric struct {
+	FeatureTag   string  `json:"feature_tag"`
+	PromptTokens int64   `json:"prompt_tokens"`
+	CachedTokens int64   `json:"cached_tokens"`
+	HitRatePct   float64 `json:"hit_rate_pct"`
+	SavedUSD     float64 `json:"saved_usd"`
+}
+
+// CacheAnalytics represents global cache efficiency and dollars saved.
+type CacheAnalytics struct {
+	TotalPromptTokens int64                `json:"total_prompt_tokens"`
+	TotalCachedTokens int64                `json:"total_cached_tokens"`
+	OverallHitRatePct float64              `json:"overall_hit_rate_pct"`
+	TotalSavedUSD     float64              `json:"total_saved_usd"`
+	TopFeatures       []CacheFeatureMetric `json:"top_features"`
+}
+
+// StatementLineItem itemizes usage on a customer invoice statement.
+type StatementLineItem struct {
+	FeatureTag       string  `json:"feature_tag"`
+	Model            string  `json:"model"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	CachedTokens     int64   `json:"cached_tokens"`
+	RequestCount     int64   `json:"request_count"`
+	TotalCostUSD     float64 `json:"total_cost_usd"`
+}
+
+// TenantStatement represents a formal billing and chargeback statement.
+type TenantStatement struct {
+	TenantID         string              `json:"tenant_id"`
+	TenantName       string              `json:"tenant_name"`
+	Period           string              `json:"period"`
+	MonthlyPlanUSD   float64             `json:"monthly_plan_usd"`
+	MonthlyBudgetUSD *float64            `json:"monthly_budget_usd,omitempty"`
+	TotalAIUsageUSD  float64             `json:"total_ai_usage_usd"`
+	GrossMarginUSD   float64             `json:"gross_margin_usd"`
+	GrossMarginPct   float64             `json:"gross_margin_pct"`
+	TotalTokens      int64               `json:"total_tokens"`
+	TotalRequests    int64               `json:"total_requests"`
+	LineItems        []StatementLineItem `json:"line_items"`
+	GeneratedAt      time.Time           `json:"generated_at"`
+}
+
 // Recommendation represents an automatic downgrade / optimization proposal.
 type Recommendation struct {
 	ID                string    `json:"id"`
@@ -694,4 +739,124 @@ func (s *Store) ListRecommendations(applied *bool) ([]Recommendation, error) {
 func (s *Store) ApplyRecommendation(id string) error {
 	_, err := s.db.Exec("UPDATE recommendations SET applied = 1 WHERE id = ?", id)
 	return err
+}
+
+// GetCacheAnalytics computes prompt cache efficiency and saved dollars.
+func (s *Store) GetCacheAnalytics(month string) (CacheAnalytics, error) {
+	if month == "" {
+		month = time.Now().Format("2006-01")
+	}
+	startTime := month + "-01 00:00:00"
+
+	query := `
+	SELECT 
+		feature_tag,
+		SUM(prompt_tokens) as total_prompt,
+		SUM(cached_tokens) as total_cached
+	FROM request_logs
+	WHERE timestamp >= ?
+	GROUP BY feature_tag
+	ORDER BY total_cached DESC
+	`
+	rows, err := s.db.Query(query, startTime)
+	if err != nil {
+		return CacheAnalytics{}, err
+	}
+	defer rows.Close()
+
+	var totalPrompt, totalCached int64
+	var features []CacheFeatureMetric
+
+	for rows.Next() {
+		var f CacheFeatureMetric
+		if err := rows.Scan(&f.FeatureTag, &f.PromptTokens, &f.CachedTokens); err != nil {
+			return CacheAnalytics{}, err
+		}
+		totalPrompt += f.PromptTokens
+		totalCached += f.CachedTokens
+
+		if f.PromptTokens > 0 {
+			f.HitRatePct = (float64(f.CachedTokens) / float64(f.PromptTokens)) * 100.0
+		}
+		// Average prompt cache savings is ~$1.75 per 1M cached tokens across Claude/GPT-4o
+		f.SavedUSD = (float64(f.CachedTokens) / 1_000_000.0) * 1.75
+		features = append(features, f)
+	}
+
+	overallRate := 0.0
+	if totalPrompt > 0 {
+		overallRate = (float64(totalCached) / float64(totalPrompt)) * 100.0
+	}
+	totalSavedUSD := (float64(totalCached) / 1_000_000.0) * 1.75
+
+	return CacheAnalytics{
+		TotalPromptTokens: totalPrompt,
+		TotalCachedTokens: totalCached,
+		OverallHitRatePct: overallRate,
+		TotalSavedUSD:     totalSavedUSD,
+		TopFeatures:       features,
+	}, nil
+}
+
+// GetTenantStatement compiles a full customer invoice statement with itemized route billing.
+func (s *Store) GetTenantStatement(tenantID, month string) (*TenantStatement, error) {
+	if month == "" {
+		month = time.Now().Format("2006-01")
+	}
+	startTime := month + "-01 00:00:00"
+
+	tenant, err := s.GetTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if tenant == nil {
+		return nil, fmt.Errorf("tenant %s not found", tenantID)
+	}
+
+	query := `
+	SELECT 
+		feature_tag,
+		model,
+		SUM(prompt_tokens) as prompt_tok,
+		SUM(completion_tokens) as comp_tok,
+		SUM(cached_tokens) as cached_tok,
+		COUNT(id) as req_count,
+		SUM(cost_usd) as cost
+	FROM request_logs
+	WHERE tenant_id = ? AND timestamp >= ?
+	GROUP BY feature_tag, model
+	ORDER BY cost DESC
+	`
+	rows, err := s.db.Query(query, tenantID, startTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stmt := &TenantStatement{
+		TenantID:         tenant.ID,
+		TenantName:       tenant.Name,
+		Period:           month,
+		MonthlyPlanUSD:   tenant.MonthlyPlanUSD,
+		MonthlyBudgetUSD: tenant.MonthlyBudgetUSD,
+		GeneratedAt:      time.Now(),
+	}
+
+	for rows.Next() {
+		var item StatementLineItem
+		if err := rows.Scan(&item.FeatureTag, &item.Model, &item.PromptTokens, &item.CompletionTokens, &item.CachedTokens, &item.RequestCount, &item.TotalCostUSD); err != nil {
+			return nil, err
+		}
+		stmt.TotalAIUsageUSD += item.TotalCostUSD
+		stmt.TotalTokens += (item.PromptTokens + item.CompletionTokens)
+		stmt.TotalRequests += item.RequestCount
+		stmt.LineItems = append(stmt.LineItems, item)
+	}
+
+	stmt.GrossMarginUSD = stmt.MonthlyPlanUSD - stmt.TotalAIUsageUSD
+	if stmt.MonthlyPlanUSD > 0 {
+		stmt.GrossMarginPct = (stmt.GrossMarginUSD / stmt.MonthlyPlanUSD) * 100.0
+	}
+
+	return stmt, nil
 }

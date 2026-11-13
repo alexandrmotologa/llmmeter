@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { X, Calendar, Trash2 } from "lucide-react";
+import { X, Calendar, Trash2, FileText } from "lucide-react";
 import { TenantDetailResponse } from "../types";
 
 interface TenantModalProps {
@@ -43,12 +43,24 @@ export const TenantModal: React.FC<TenantModalProps> = ({ tenantId, onClose, onD
             </p>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-surface-2 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <a
+              href={`/api/tenants/${tenantId}/statement?format=html`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md bg-surface-2 hover:bg-surface-3 text-zinc-300 border border-surface-border transition-colors"
+            >
+              <FileText className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Official Statement</span>
+            </a>
+
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-surface-2 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Modal Body */}

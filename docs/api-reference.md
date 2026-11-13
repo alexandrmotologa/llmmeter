@@ -88,6 +88,41 @@ Returns customer audit details including daily spending trends, feature breakdow
 
 ---
 
+### GET `/api/tenants/{id}/statement`
+Generates an official billing and AI consumption audit statement.
+- Query Parameters:
+  - `month` (optional, format `YYYY-MM`)
+  - `format` (optional, `json` or `html`): When set to `html`, returns a printable statement styled for PDF generation.
+- Response includes subscription plan fee, total AI usage cost, net gross margin, token metrics, and per-feature cost distribution.
+
+---
+
+### GET `/api/cache-analytics`
+Returns aggregate and per-feature prompt caching metrics.
+- Response includes `total_prompt_tokens`, `total_cached_tokens`, `overall_hit_rate_pct`, `total_saved_usd`, and `top_features` breakdown.
+
+---
+
+### POST `/api/simulator/simulate`
+Runs what-if financial projections based on potential pricing adjustments or model migrations.
+- Request Body:
+  - `subscription_increase_usd` (number): Proposed flat plan price increase.
+  - `model_replacements` (object): Map of source model to replacement target model.
+- Response returns baseline revenue/cost/margin versus simulated revenue/cost/margin and projected net monthly gain.
+
+---
+
+### GET `/metrics`
+Prometheus metrics exposition endpoint. Exposes standard metrics including:
+- `llmmeter_http_requests_total`
+- `llmmeter_tokens_total`
+- `llmmeter_cost_usd_total`
+- `llmmeter_cache_hits_total`
+- `llmmeter_cache_saved_usd_total`
+- `llmmeter_unprofitable_tenants`
+
+---
+
 ### DELETE `/api/tenants/{id}`
 Removes a tenant record.
 
