@@ -1,0 +1,30 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# SQLite databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+finops.db*
+
+# Node & Frontend
+node_modules/
+web/node_modules/
+.vite/
+*.local
+
+# Reports & exports
+unprofitable*.csv
+*.tmp
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
