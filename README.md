@@ -1,30 +1,59 @@
-# llmmeter
+<p align="center">
+  <img src="docs/images/logo.png?raw=true" alt="llmmeter Logo" width="130" style="border-radius: 24px;" />
+</p>
 
-Multi-provider LLM cost attribution, tenant chargeback, and gross margin analyzer. Built as a single Go binary with an embedded React 19 analytics dashboard.
+<h1 align="center">llmmeter</h1>
 
-## Overview
+<p align="center">
+  <strong>Multi-Provider LLM Cost Attribution, Tenant Chargeback &amp; Margin Analyzer</strong><br />
+  Single Go binary reverse proxy (&lt;20MB RAM, &lt;3ms latency) with embedded React 19 FinOps Studio.
+</p>
 
-Software companies that sell AI features on flat subscription plans often lose money on high-usage accounts without realizing it. A customer paying $49 per month might consume $83 worth of Claude 3.5 Sonnet tokens, creating negative gross margins.
+<p align="center">
+  <a href="https://github.com/alexandrmotologa/llmmeter/actions"><img src="https://img.shields.io/github/actions/workflow/status/alexandrmotologa/llmmeter/ci.yml?branch=master&label=CI&style=flat-square" alt="CI Status" /></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go Version" /></a>
+  <a href="https://react.dev"><img src="https://img.shields.io/badge/React-19.0-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React 19" /></a>
+  <a href="https://sqlite.org"><img src="https://img.shields.io/badge/SQLite-WAL%20Mode-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite WAL" /></a>
+  <a href="#license"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License" /></a>
+</p>
 
-`llmmeter` runs as a reverse proxy in front of upstream AI providers (OpenAI, Anthropic, Google Gemini, Groq, Mistral, AWS Bedrock). It extracts tenant and feature metadata from incoming HTTP headers, logs token counts, calculates costs per request, and updates customer gross margin metrics in real time.
+---
+
+## Interactive Demo
+
+![llmmeter FinOps Demo](docs/images/llmmeter_demo.gif)
+
+---
+
+## The Problem
+
+Software companies that sell AI features on flat monthly subscription tiers (e.g. $29 or $49 per month) frequently suffer from negative gross margins on power-user accounts. A single customer paying $49 per month can easily consume $83 worth of Claude 3.5 Sonnet or GPT-4o tokens, quietly eroding company profitability.
+
+Without granular per-tenant token metering and cost attribution, engineering teams and finance leaders only discover this margin bleed when the aggregate monthly cloud bill arrives from OpenAI or Anthropic.
+
+`llmmeter` solves this problem. It acts as a transparent, high-performance reverse proxy positioned between your application servers and upstream LLM providers, calculating exact gross margins per customer in real time.
+
+---
 
 ## Key Capabilities
 
-- **Sub-3ms Reverse Proxy**: Forwards requests to OpenAI, Anthropic, Gemini, Groq, Mistral, and Bedrock with streaming SSE passthrough.
+- **Sub-3ms Reverse Proxy**: Forwards requests to OpenAI, Anthropic, Gemini, Groq, Mistral, and Bedrock with zero buffering SSE streaming.
 - **Tenant Cost Attribution**: Tracks token volumes and dollars per tenant using `X-Tenant-ID` or prefixed API keys (`sk-t{tenant}-{key}`).
-- **Feature Cost Attribution**: Identifies which specific features (e.g. search, summarization, copilot) drive the monthly cloud invoice via `X-Feature-Tag`.
-- **Gross Margin Engine**: Compares customer subscription tiers against exact LLM token costs:
+- **Feature Cost Attribution**: Identifies which specific application features (e.g. search, summarization, copilot) drive the monthly cloud invoice via `X-Feature-Tag`.
+- **Gross Margin Engine**: Compares customer subscription tiers against exact LLM token costs in real time:
   `Gross Margin % = ((Subscription Revenue - LLM Cost) / Subscription Revenue) * 100`
-- **Dynamic Auto-Rightsizing**: Intercepts requests for accounts operating at negative gross margin and transparently routes expensive models to cost-effective alternatives with header `X-Auto-Rightsizing: true`.
+- **Dynamic Auto-Rightsizing**: Automatically redirects requests from accounts operating at negative gross margin to cost-effective alternatives (e.g. Claude 3.5 Sonnet to Claude 3.5 Haiku) with header `X-Auto-Rightsizing: true`.
 - **Semantic Caching & Token ROI**: In-memory semantic hash cache delivering sub-millisecond latency (`X-Cache: HIT`) and real-time dollar tracking on Anthropic and OpenAI prompt caching.
 - **Circuit Breakers & Rate Limits**: Per-tenant RPM/TPM sliding windows and runaway agent loop circuit breakers that trip if tenant spend surges beyond configured thresholds.
 - **Prometheus Observability**: Native `/metrics` endpoint with Prometheus counters and histograms for Grafana and Datadog monitoring.
-- **Interactive What-If Simulator**: Models the exact financial impact of subscription price adjustments and model migration policies before deploying code changes.
-- **Auditor Tenant Statements**: Generates print-ready HTML and JSON billing audit statements for FinOps teams and customer invoice reconciliations.
+- **Interactive What-If Simulator**: Interactive UI modeling the exact dollar gains of plan price changes and model migration policies before deploying code changes.
+- **Auditor Tenant Statements**: Generates print-ready HTML and JSON customer invoice statements for FinOps teams and accounting reconciliations.
 - **Anomaly Detection**: Flags individual requests that cost more than 3x the tenant 30-day baseline.
 - **Budget Guardrails**: Enforces monthly budget caps per customer. Throttles requests with HTTP 429 when limits are reached.
 - **Downgrade Advisor**: Scans routes with negative margins and suggests cheaper model substitutions with projected monthly savings.
 - **Embedded Web Cockpit**: Ships with a dark-theme React 19 dashboard inside the Go binary. Uses under 20MB of RAM.
+
+---
 
 ## Architecture
 
@@ -60,14 +89,54 @@ Software companies that sell AI features on flat subscription plans often lose m
        |  - Tenant Gross Margin Tables                          |
        +--------------------------------------------------------+
                                    |
-                                   v
-       +--------------------------------------------------------+
-       |            React 19 FinOps Studio & Alerts             |
-       |  - Tenant Margin Heatmap (Negative Margin Alerts)      |
-       |  - Feature Breakdown Waterfall                         |
-       |  - 1-Click Downgrade Recommendation Optimizer          |
-       +--------------------------------------------------------+
+                     +-------------+-------------+
+                     |                           |
+                     v                           v
+       +---------------------------+   +---------------------------+
+       | React 19 FinOps Studio    |   | Prometheus /metrics       |
+       | - Margin Heatmap          |   | - Latency Histograms      |
+       | - What-If Simulator       |   | - Token & Cost Counters   |
+       | - Downgrade Advisor       |   | - Cache Hit Ratios        |
+       +---------------------------+   +---------------------------+
 ```
+
+---
+
+## FinOps Cockpit Walkthrough
+
+### 1. Executive Overview & Real-Time Margin Heatmap
+Instant visibility into portfolio-wide gross margins, active alerts, token volumes, and unprofitable accounts.
+
+![Executive Overview](docs/images/01_dashboard_overview.png)
+
+### 2. Tenant Unit Economics & Negative Margin Warnings
+Live audit table comparing monthly customer subscription pricing against cumulative LLM infrastructure costs.
+
+![Tenant Margins Table](docs/images/02_tenant_margins.png)
+
+### 3. Interactive "What-If" Gross Margin Simulator
+Model the financial return of SaaS subscription price adjustments and model rightsizing policies before updating code.
+
+![What-If Simulator](docs/images/03_margin_simulator.png)
+
+### 4. Prompt Cache Efficiency & Dollar Savings
+Track token reuse percentages and exact dollars saved across OpenAI and Anthropic prompt caching routes.
+
+![Prompt Cache ROI](docs/images/04_cache_roi.png)
+
+### 5. Printable Customer Audit Statements
+Generates official, print-ready billing audit reports for finance departments and enterprise customer reviews.
+
+![Printable Audit Statement](docs/images/05_tenant_statement.png)
+
+### 6. Responsive UI on Mobile Devices
+Full responsiveness across smartphones, tablets, and desktop workstations.
+
+<p align="center">
+  <img src="docs/images/06_mobile_responsive.png" alt="Mobile View" width="340" style="border-radius: 12px; border: 1px solid #27272a;" />
+</p>
+
+---
 
 ## Quick Start
 
@@ -115,7 +184,11 @@ curl http://localhost:8080/v1/chat/completions \
 Terminal output:
 
 ```
-Executive Customer Gross Margin Audit Report — Month: 2026-11
+========================================================================
+                      llmmeter FinOps Engine
+    Multi-Provider LLM Cost Attribution, Tenant Chargeback & Margin
+========================================================================
+Executive Customer Gross Margin Audit Report - Month: 2026-11
 
 TENANT ID     NAME                     SUBSCRIPTION   LLM COST   GROSS MARGIN   MARGIN %   STATUS
 ---------     ----                     ------------   --------   ------------   --------   ------
@@ -139,6 +212,8 @@ Negative Margin Customers:    1 / 5
 ./bin/llmmeter export-negative-margins --output ./unprofitable_tenants.csv
 ```
 
+---
+
 ## CLI Reference
 
 | Command | Description |
@@ -150,6 +225,8 @@ Negative Margin Customers:    1 / 5
 | `llmmeter demo [--db ./finops.db]` | Seeds enterprise sample data for evaluation |
 | `llmmeter version` | Displays version and build runtime details |
 
+---
+
 ## Supported Providers & Models
 
 - **OpenAI**: GPT-4o, GPT-4o-mini, GPT-4 Turbo, GPT-3.5 Turbo, o1, o1-mini, o3-mini, Embeddings
@@ -158,6 +235,8 @@ Negative Margin Customers:    1 / 5
 - **Groq**: Llama 3.1 (70B, 8B), Mixtral 8x7B
 - **Mistral**: Mistral Large, Mistral Small, Codestral
 - **AWS Bedrock**: Claude and Llama via `bedrock/` prefix
+
+---
 
 ## Storage Schema
 
@@ -189,11 +268,15 @@ CREATE TABLE request_logs (
 );
 ```
 
+---
+
 ## Documentation
 
 - [Architecture Guide](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
 - [Deployment & Docker Guide](docs/deployment.md)
+
+---
 
 ## License
 
